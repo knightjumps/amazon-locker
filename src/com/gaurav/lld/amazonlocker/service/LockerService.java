@@ -33,22 +33,23 @@ public final class LockerService {
         LockerLocation l = location(locationId);
         Locker k = reserve(l, parcel);
         k.store(parcel);
-        AccessCredential c = issue(k, parcel, AccessPurpose.CUSTOMER_PICKUP);
+        AccessCredential c = issue(l, k, parcel, AccessPurpose.CUSTOMER_PICKUP);
         notifications.notify("customer", "Package is ready in " + k.id());
         return c;
     }
 
     public AccessCredential requestReturn(String locationId, Parcel parcel) {
         if (!parcel.isReturn()) throw new IllegalArgumentException("Not a return parcel");
-        Locker k = reserve(location(locationId), parcel);
-        return issue(k, parcel, AccessPurpose.RETURN_DROPOFF);
+        LockerLocation l = location(locationId);
+        Locker k = reserve(l, parcel);
+        return issue(l, k, parcel, AccessPurpose.RETURN_DROPOFF);
     }
 
     public AccessCredential dropOffReturn(String code) {
         Grant g = consume(code, AccessPurpose.RETURN_DROPOFF);
         Locker k = location(g.locationId).locker(g.lockerId);
         k.store(g.parcel);
-        AccessCredential c = issue(k, g.parcel, AccessPurpose.COURIER_COLLECTION);
+        AccessCredential c = issue(location(g.locationId), k, g.parcel, AccessPurpose.COURIER_COLLECTION);
         notifications.notify("courier", "Return waiting in " + k.id());
         return c;
     }
@@ -67,8 +68,12 @@ public final class LockerService {
         ReentrantLock lock = locks.get(l.id());
         lock.lock();
         try {
-            if (!l.openAt(clock.instant())) throw new IllegalStateException("location closed");
-            Locker k = l.lockers().stream().filter(x -> x.available() && x.fits(p)).min(Comparator.comparingInt(x -> x.size().volume())).orElseThrow(() -> new IllegalStateException("no suitable locker"));
+            if (!l.openAt(clock.instant()))
+                throw new IllegalStateException("location closed");
+            Locker k = l.lockers().stream()
+                    .filter(x -> x.available() && x.fits(p))
+                    .min(Comparator.comparingInt(x -> x.size().volume()))
+                    .orElseThrow(() -> new IllegalStateException("no suitable locker"));
             k.reserve();
             return k;
         } finally {
@@ -76,14 +81,17 @@ public final class LockerService {
         }
     }
 
-    private AccessCredential issue(Locker k, Parcel p, AccessPurpose purpose) {
+    private AccessCredential issue(LockerLocation location, Locker k, Parcel p, AccessPurpose purpose) {
         String code = UUID.randomUUID().toString();
-        grants.put(code, new Grant(k.id(), findLocation(k.id()), p, purpose, clock.instant().plus(Duration.ofDays(3))));
+        grants.put(code,
+                new Grant(k.id(), location.id(), p, purpose,
+                        clock.instant().plus(Duration.ofDays(3))));
         return new AccessCredential(k.id(), code, clock.instant().plus(Duration.ofDays(3)));
     }
 
     private Grant consume(String code, AccessPurpose purpose) {
-        Grant g = Optional.ofNullable(grants.get(code)).orElseThrow(() -> new IllegalArgumentException("invalid code"));
+        Grant g = Optional.ofNullable(grants.get(code))
+                .orElseThrow(() -> new IllegalArgumentException("invalid code"));
         if (g.used || g.purpose != purpose || !clock.instant().isBefore(g.expiry))
             throw new IllegalStateException("code unavailable");
         g.used = true;
@@ -92,10 +100,6 @@ public final class LockerService {
 
     private LockerLocation location(String id) {
         return locations.find(id).orElseThrow(() -> new IllegalArgumentException("unknown location"));
-    }
-
-    private String findLocation(String lockerId) {
-        return locks.keySet().stream().filter(id -> location(id).lockers().stream().anyMatch(l -> l.id().equals(lockerId))).findFirst().orElseThrow();
     }
 
     private static final class Grant {
